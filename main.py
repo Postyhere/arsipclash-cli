@@ -1,134 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# ArsipClash CLI (fixed) - supports VMess, VLESS, Trojan
 
-import sys, re, json, base64
-from urllib.parse import urlparse, parse_qs, unquote
+import base64, json, sys
+from urllib.parse import urlparse, parse_qs
 
-def b64_normalize(s: str):
-    s = s.replace('-', '+').replace('_', '/')
-    pad = len(s) % 4
-    if pad:
-        s += '=' * (4 - pad)
-    return s
-
-LINK_REGEX = re.compile(r"(vmess://[A-Za-z0-9\-\_\=\/\+]+|vless://[^\s]+|trojan://[^\s]+)", re.IGNORECASE)
-
-def extract_links(text: str):
-    found = LINK_REGEX.findall(text or "")
-    out = []
-    for x in found:
-        t = x.strip()
-        if t and t not in out:
-            out.append(t)
-    return out
-
-# ---------------- VMESS ----------------
-def parse_vmess(link: str):
-    try:
-        payload = link[len("vmess://"):].split('#')[0].strip()
-        decoded = base64.b64decode(b64_normalize(payload)).decode("utf-8", errors="ignore")
-        obj = json.loads(decoded)
-        return obj
-    except Exception as e:
-        print("❌ vmess parse error:", e)
-        return None
-
-def vmess_to_clash(v):
-    name = v.get("ps") or f"VMess {v.get('add','')}"
-    tlsEnabled = v.get("tls") in ("tls", "TLS", "1", True)
-    net = (v.get("net") or "ws").lower()
-    proxy = {
-        "name": str(name),
-        "type": "vmess",
-        "server": v.get("add"),
-        "port": int(v.get("port") or 0),
-        "uuid": v.get("id"),
-        "alterId": int(v.get("aid") or 0),
-        "cipher": "auto",
-        "tls": tlsEnabled,
-        "skip-cert-verify": True,
-        "udp": True,
-        "network": net
-    }
-    sni = v.get("sni") or v.get("host") or None
-    if tlsEnabled and sni:
-        proxy["servername"] = sni
-    if net == "ws":
-        path = v.get("path") or "/"
-        host = v.get("host") or sni or v.get("add")
-        proxy["ws-opts"] = {"path": path, "headers": {"Host": host}}
-    return proxy
-
-# ---------------- VLESS ----------------
-def parse_vless(link: str):
-    try:
-        u = urlparse(link)
-        uuid = u.username or ""
-        hostname = u.hostname
-        port = int(u.port) if u.port else 443
-        params = parse_qs(u.query)
-        net = (params.get("type") or ["tcp"])[0].lower()
-        security = (params.get("security") or [""])[0].lower()
-        tls = security in ("tls", "reality", "xtls")
-        sni = (params.get("sni") or [hostname])[0]
-        path = (params.get("path") or ["/"])[0]
-        hostHeader = (params.get("host") or [sni or hostname])[0]
-        name = unquote(u.fragment) if u.fragment else f"VLESS {hostname}:{port}"
-        d = {
-            "name": name,
-            "type": "vless",
-            "server": hostname,
-            "port": port,
-            "uuid": uuid,
-            "tls": tls,
-            "udp": True,
-            "network": net
-        }
-        if tls and sni:
-            d["servername"] = sni
-        if net == "ws":
-            d["ws-opts"] = {"path": path, "headers": {"Host": hostHeader}}
-        return d
-    except Exception as e:
-        print("❌ vless parse error:", e)
-        return None
-
-# ---------------- TROJAN ----------------
-def parse_trojan(link: str):
-    try:
-        u = urlparse(link)
-        password = unquote(u.username or "")
-        hostname = u.hostname
-        port = int(u.port) if u.port else 443
-        params = parse_qs(u.query)
-        net = (params.get("type") or ["tcp"])[0].lower()
-        security = (params.get("security") or ["tls"])[0].lower()
-        tls = security == "tls"
-        sni = (params.get("sni") or [hostname])[0]
-        path = (params.get("path") or ["/"])[0]
-        hostHeader = (params.get("host") or [sni or hostname])[0]
-        name = unquote(u.fragment) if u.fragment else f"TROJAN {hostname}:{port}"
-        d = {
-            "name": name,
-            "type": "trojan",
-            "server": hostname,
-            "port": port,
-            "password": password,
-            "tls": tls,
-            "sni": sni,
-            "udp": True,
-            "network": net
-        }
-        if net == "ws":
-            d["ws-opts"] = {"path": path, "headers": {"Host": hostHeader}}
-        return d
-    except Exception as e:
-        print("❌ trojan parse error:", e)
-        return None
-
-# ---------------- YAML BUILD ----------------
-HEADER = """redir-port: 9797
+HEADER = '''redir-port: 9797
 tproxy-port: 9898
 mode: global
 allow-lan: true
@@ -147,62 +23,205 @@ keep-alive-interval: 15
 geo-auto-update: false
 geo-update-interval: 24
 tcp-concurrent: true
+tun:
+  exclude-package: [
+    ]
+  enable: false
+  mtu: 9000
+  device: clash
+  stack: mixed
+  dns-hijack:
+  - any:53
+  - tcp://any:53
+  auto-route: true
+  strict-route: false
+  auto-redirect: true
+  auto-detect-interface: true
+profile:
+  store-selected: true
+  store-fake-ip: false
+dns:
+  cache-algorithm: arc
+  enable: true
+  prefer-h3: false
+  ipv6: false
+  default-nameserver:
+  - 8.8.8.8
+  - 1.1.1.1
+  listen: 0.0.0.0:1053
+  use-hosts: true
+  enhanced-mode: redir-host
+  fake-ip-range: 198.18.0.1/16
+  fake-ip-filter:
+  - '*.lan'
+  - '*.ntp.*'
+  nameserver:
+  - 1.1.1.1
+  - 8.8.8.8
+  proxy-server-nameserver:
+  - 112.215.203.246
+'''
 
-proxies:
-"""
+def _ensure_path(p):
+    if not p:
+        return "/"
+    return p if p.startswith("/") else ("/" + p)
 
-def build_clash_yaml(proxies_list):
-    lines = [HEADER]
-    for p in proxies_list:
-        lines.append(f"- name: \"{p.get('name','Proxy')}\"")
-        for key in p:
-            if key not in ("name", "ws-opts") and p[key] is not None:
-                lines.append(f"  {key}: {p[key]}")
-        if "ws-opts" in p:
-            ws = p["ws-opts"]
-            lines.append("  ws-opts:")
-            lines.append(f"    path: \"{ws['path']}\"")
-            lines.append("    headers:")
-            lines.append(f"      Host: \"{ws['headers']['Host']}\"")
-    lines.append("proxy-groups:")
-    lines.append("  - name: \"🆃🆆🅾🅿🅴🅽\"")
-    lines.append("    type: select")
-    lines.append("    proxies:")
-    for p in proxies_list:
-        lines.append(f"      - \"{p['name']}\"")
-    lines.append("      - DIRECT")
-    lines.append("rules:")
-    lines.append("- MATCH,🆃🆆🅾🅿🅴🅽")
-    return "\n".join(lines)
+def _lower_or_none(x):
+    return x.lower() if isinstance(x, str) else x
 
-# --------------- MAIN ---------------
-def main():
-    proxies = []
-    print("Masukkan link VMess/VLESS/Trojan (kosongkan untuk selesai):")
+def parse_vmess(link):
+    b64 = link.split("://",1)[1].strip()
+    b64 += "=" * (-len(b64) % 4)
+    data = json.loads(base64.b64decode(b64).decode("utf-8"))
+    name = data.get("ps") or "Proxy1"
+    server = data.get("add") or ""
+    port = int(data.get("port", 443))
+    uuid = data.get("id") or ""
+    aid  = int(data.get("aid") or 0)
+    net  = data.get("net") or "ws"
+    path = _ensure_path(data.get("path"))
+    host = _lower_or_none(data.get("host") or data.get("sni"))
+    sni  = _lower_or_none(data.get("sni") or host)
+
+    return {
+        "name": name,
+        "type": "vmess",
+        "server": server,
+        "port": port,
+        "uuid": uuid,
+        "alterId": aid,
+        "cipher": "auto",
+        "tls": True,
+        "skip-cert-verify": True,
+        "udp": True,
+        "network": net,
+        "ws-opts": {"path": path, "headers": {"Host": host or ""}},
+        "servername": sni or "",
+    }
+
+def parse_vless(link):
+    u = urlparse(link)
+    name = (u.fragment or "ProxyVLESS").strip()
+    uuid = u.username or ""
+    server = u.hostname or ""
+    port = int(u.port or 443)
+    q = parse_qs(u.query)
+    typ = q.get("type",["ws"])[0]
+    path = _ensure_path(q.get("path",["/"])[0])
+    host = _lower_or_none(q.get("host",[None])[0])
+    sni  = _lower_or_none(q.get("sni",[host])[0])
+
+    return {
+        "name": name,
+        "type": "vless",
+        "server": server,
+        "port": port,
+        "uuid": uuid,
+        "tls": True,
+        "skip-cert-verify": True,
+        "udp": True,
+        "network": typ,
+        "ws-opts": {"path": path, "headers": {"Host": host or ""}},
+        "servername": sni or "",
+    }
+
+def parse_trojan(link):
+    u = urlparse(link)
+    name = (u.fragment or "ProxyTrojan").strip()
+    pwd = u.username or ""
+    server = u.hostname or ""
+    port = int(u.port or 443)
+    q = parse_qs(u.query)
+    typ = q.get("type",["ws"])[0]
+    path = _ensure_path(q.get("path",["/"])[0])
+    host = _lower_or_none(q.get("host",[None])[0])
+    sni  = _lower_or_none(q.get("sni",[host])[0])
+
+    return {
+        "name": name,
+        "type": "trojan",
+        "server": server,
+        "port": port,
+        "password": pwd,
+        "tls": True,
+        "skip-cert-verify": True,
+        "udp": True,
+        "network": typ,
+        "ws-opts": {"path": path, "headers": {"Host": host or ""}},
+        "servername": sni or "",
+    }
+
+def parse_link(link):
+    scheme = link.split("://",1)[0].lower()
+    if scheme == "vmess": return parse_vmess(link)
+    if scheme == "vless": return parse_vless(link)
+    if scheme == "trojan": return parse_trojan(link)
+    return None
+
+def collect_proxies():
+    print("Masukkan link VMess/VLESS/Trojan (Enter kosong untuk selesai):")
+    items, idx = [], 1
     while True:
         try:
-            link = input("> ").strip()
-        except (EOFError, KeyboardInterrupt):
+            raw = input("> ").strip()
+        except EOFError:
             break
-        if not link:
+        if raw == "" or raw.lower() == "selesai":
             break
-        if link.startswith("vmess://"):
-            obj = parse_vmess(link)
-            if obj: proxies.append(vmess_to_clash(obj))
-        elif link.startswith("vless://"):
-            obj = parse_vless(link)
-            if obj: proxies.append(obj)
-        elif link.startswith("trojan://"):
-            obj = parse_trojan(link)
-            if obj: proxies.append(obj)
-        else:
+        p = parse_link(raw)
+        if not p:
             print("❌ Link tidak dikenal")
+            continue
+        if not p.get("name"):
+            p["name"] = f"Proxy{idx}"
+        items.append(p); idx += 1
+    return items
 
-    if proxies:
-        print("\n===== Hasil Config =====\n")
-        print(build_clash_yaml(proxies))
-    else:
-        print("❌ Tidak ada link valid")
+def emit_yaml(proxies):
+    print(HEADER, end="")
+    print("proxies:")
+    for p in proxies:
+        print(f"- name: {p['name']}")
+        print(f"  type: {p['type']}")
+        print(f"  server: {p['server']}")
+        print(f"  port: {p['port']}")
+        if p["type"] == "vmess":
+            print(f"  uuid: {p['uuid']}")
+            print(f"  alterId: {p.get('alterId',0)}")
+            print("  cipher: auto")
+        elif p["type"] == "vless":
+            print(f"  uuid: {p['uuid']}")
+        elif p["type"] == "trojan":
+            print(f"  password: {p['password']}")
+        print("  tls: true")
+        print("  skip-cert-verify: true")
+        print("  udp: true")
+        print(f"  network: {p.get('network','ws')}")
+        path = p["ws-opts"]["path"]
+        host = p["ws-opts"]["headers"]["Host"]
+        print("  ws-opts:")
+        print(f"    path: {path}")
+        print("    headers:")
+        print(f"      Host: {host}")
+        print(f"  servername: {p.get('servername','')}")
+    print("proxy-groups:")
+    print("- name: 🆃🆆🅾🅿🅴🅽")
+    print("  type: select")
+    print("  proxies:")
+    print("  - DIRECT")
+    for p in proxies:
+        print(f"  - {p['name']}")
+    print("rules:")
+    print("- MATCH,🆃🆆🅾🅿🅴🅽")
+
+
+def main():
+    proxies = collect_proxies()
+    if not proxies:
+        print("Tidak ada link.")
+        sys.exit(1)
+    emit_yaml(proxies)
 
 if __name__ == "__main__":
     main()
